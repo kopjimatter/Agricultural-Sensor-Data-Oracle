@@ -5,6 +5,8 @@
 (define-constant ERR_ORACLE_NOT_FOUND (err u103))
 (define-constant ERR_INSUFFICIENT_PAYMENT (err u104))
 (define-constant ERR_ALREADY_EXISTS (err u105))
+(define-constant ERR_NO_DATA_AVAILABLE (err u106))
+(define-constant ERR_INVALID_WINDOW (err u107))
 
 (define-data-var oracle-fee uint u1000000)
 (define-data-var next-sensor-id uint u1)
@@ -260,4 +262,84 @@
 
 (define-read-only (get-next-oracle-id)
   (var-get next-oracle-id)
+)
+
+
+(define-map sensor-analytics
+  { sensor-id: uint }
+  {
+    sample-count: uint,
+    temp-min: int,
+    temp-max: int,
+    temp-sum: int,
+    humidity-min: uint,
+    humidity-max: uint,
+    humidity-sum: uint,
+    moisture-min: uint,
+    moisture-max: uint,
+    moisture-sum: uint,
+    last-analysis: uint
+  }
+)
+
+(define-private (update-sensor-analytics 
+  (sensor-id uint)
+  (temperature int)
+  (humidity uint)
+  (soil-moisture uint)
+)
+  (let
+    (
+      (current-stats (default-to {
+        sample-count: u0,
+        temp-min: temperature,
+        temp-max: temperature,
+        temp-sum: temperature,
+        humidity-min: humidity,
+        humidity-max: humidity,
+        humidity-sum: humidity,
+        moisture-min: soil-moisture,
+        moisture-max: soil-moisture,
+        moisture-sum: soil-moisture,
+        last-analysis: u0
+      } (map-get? sensor-analytics { sensor-id: sensor-id })))
+    )
+    (map-set sensor-analytics
+      { sensor-id: sensor-id }
+      {
+        sample-count: (+ (get sample-count current-stats) u1),
+        temp-min: (if (< temperature (get temp-min current-stats)) temperature (get temp-min current-stats)),
+        temp-max: (if (> temperature (get temp-max current-stats)) temperature (get temp-max current-stats)),
+        temp-sum: (+ (get temp-sum current-stats) temperature),
+        humidity-min: (if (< humidity (get humidity-min current-stats)) humidity (get humidity-min current-stats)),
+        humidity-max: (if (> humidity (get humidity-max current-stats)) humidity (get humidity-max current-stats)),
+        humidity-sum: (+ (get humidity-sum current-stats) humidity),
+        moisture-min: (if (< soil-moisture (get moisture-min current-stats)) soil-moisture (get moisture-min current-stats)),
+        moisture-max: (if (> soil-moisture (get moisture-max current-stats)) soil-moisture (get moisture-max current-stats)),
+        moisture-sum: (+ (get moisture-sum current-stats) soil-moisture),
+        last-analysis: stacks-block-height
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-sensor-analytics (sensor-id uint))
+  (map-get? sensor-analytics { sensor-id: sensor-id })
+)
+
+(define-read-only (get-sensor-averages (sensor-id uint))
+  (let
+    (
+      (stats (unwrap! (map-get? sensor-analytics { sensor-id: sensor-id }) ERR_NO_DATA_AVAILABLE))
+      (sample-count (get sample-count stats))
+    )
+    (asserts! (> sample-count u0) ERR_NO_DATA_AVAILABLE)
+    (ok {
+      temp-avg: (/ (get temp-sum stats) (to-int sample-count)),
+      humidity-avg: (/ (get humidity-sum stats) sample-count),
+      moisture-avg: (/ (get moisture-sum stats) sample-count),
+      sample-count: sample-count
+    })
+  )
 )
