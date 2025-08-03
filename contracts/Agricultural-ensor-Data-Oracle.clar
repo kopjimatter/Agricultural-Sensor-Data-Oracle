@@ -8,6 +8,8 @@
 (define-constant ERR_NO_DATA_AVAILABLE (err u106))
 (define-constant ERR_INVALID_WINDOW (err u107))
 
+(define-constant ERR_QUALITY_CHECK_FAILED (err u108))
+
 (define-data-var oracle-fee uint u1000000)
 (define-data-var next-sensor-id uint u1)
 (define-data-var next-oracle-id uint u1)
@@ -342,4 +344,104 @@
       sample-count: sample-count
     })
   )
+)
+
+
+(define-map data-quality-scores
+  { sensor-id: uint, timestamp: uint }
+  {
+    temperature-score: uint,
+    humidity-score: uint,
+    moisture-score: uint,
+    ph-score: uint,
+    overall-score: uint,
+    validated: bool
+  }
+)
+
+(define-map oracle-quality-metrics
+  { oracle-id: uint }
+  {
+    total-submissions: uint,
+    high-quality-submissions: uint,
+    quality-ratio: uint,
+    last-quality-update: uint
+  }
+)
+
+(define-private (calculate-quality-score (value uint) (min-val uint) (max-val uint))
+  (if (and (>= value min-val) (<= value max-val))
+    u100
+    (if (or (< value (- min-val u10)) (> value (+ max-val u10)))
+      u0
+      u50
+    )
+  )
+)
+
+(define-private (validate-data-quality 
+  (sensor-id uint)
+  (timestamp uint)
+  (temperature int)
+  (humidity uint)
+  (soil-moisture uint)
+  (ph-level uint)
+)
+  (let
+    (
+      (temp-score (if (and (>= temperature -40) (<= temperature 60)) u100 u0))
+      (humidity-score (calculate-quality-score humidity u0 u100))
+      (moisture-score (calculate-quality-score soil-moisture u0 u100))
+      (ph-score (calculate-quality-score ph-level u0 u1400))
+      (overall-score (/ (+ temp-score humidity-score moisture-score ph-score) u4))
+    )
+    (map-set data-quality-scores
+      { sensor-id: sensor-id, timestamp: timestamp }
+      {
+        temperature-score: temp-score,
+        humidity-score: humidity-score,
+        moisture-score: moisture-score,
+        ph-score: ph-score,
+        overall-score: overall-score,
+        validated: (>= overall-score u75)
+      }
+    )
+    overall-score
+  )
+)
+
+(define-private (update-oracle-quality (oracle-id uint) (quality-score uint))
+  (let
+    (
+      (current-metrics (default-to {
+        total-submissions: u0,
+        high-quality-submissions: u0,
+        quality-ratio: u100,
+        last-quality-update: u0
+      } (map-get? oracle-quality-metrics { oracle-id: oracle-id })))
+      (new-total (+ (get total-submissions current-metrics) u1))
+      (new-high-quality (if (>= quality-score u75) 
+        (+ (get high-quality-submissions current-metrics) u1)
+        (get high-quality-submissions current-metrics)))
+      (new-ratio (/ (* new-high-quality u100) new-total))
+    )
+    (map-set oracle-quality-metrics
+      { oracle-id: oracle-id }
+      {
+        total-submissions: new-total,
+        high-quality-submissions: new-high-quality,
+        quality-ratio: new-ratio,
+        last-quality-update: stacks-block-height
+      }
+    )
+    (ok new-ratio)
+  )
+)
+
+(define-read-only (get-data-quality (sensor-id uint) (timestamp uint))
+  (map-get? data-quality-scores { sensor-id: sensor-id, timestamp: timestamp })
+)
+
+(define-read-only (get-oracle-quality-metrics (oracle-id uint))
+  (map-get? oracle-quality-metrics { oracle-id: oracle-id })
 )
