@@ -10,6 +10,9 @@
 
 (define-constant ERR_QUALITY_CHECK_FAILED (err u108))
 
+(define-constant ERR_ALERT_NOT_FOUND (err u109))
+(define-constant ERR_INVALID_THRESHOLD (err u110))
+
 (define-data-var oracle-fee uint u1000000)
 (define-data-var next-sensor-id uint u1)
 (define-data-var next-oracle-id uint u1)
@@ -444,4 +447,135 @@
 
 (define-read-only (get-oracle-quality-metrics (oracle-id uint))
   (map-get? oracle-quality-metrics { oracle-id: oracle-id })
+)
+
+
+(define-data-var next-alert-id uint u1)
+
+(define-map sensor-thresholds
+  { sensor-id: uint }
+  {
+    temp-min: int,
+    temp-max: int,
+    humidity-min: uint,
+    humidity-max: uint,
+    moisture-min: uint,
+    moisture-max: uint,
+    ph-min: uint,
+    ph-max: uint,
+    active: bool,
+    owner: principal,
+    created-at: uint
+  }
+)
+
+(define-map active-alerts
+  { alert-id: uint }
+  {
+    sensor-id: uint,
+    alert-type: (string-ascii 20),
+    value: int,
+    threshold: int,
+    timestamp: uint,
+    resolved: bool,
+    severity: uint
+  }
+)
+
+(define-public (set-sensor-thresholds 
+  (sensor-id uint)
+  (temp-min int) (temp-max int)
+  (humidity-min uint) (humidity-max uint)
+  (moisture-min uint) (moisture-max uint)
+  (ph-min uint) (ph-max uint)
+)
+  (let
+    (
+      (sensor (unwrap! (map-get? sensors { sensor-id: sensor-id }) ERR_SENSOR_NOT_FOUND))
+    )
+    (asserts! (is-eq tx-sender (get owner sensor)) ERR_UNAUTHORIZED)
+    (asserts! (< temp-min temp-max) ERR_INVALID_THRESHOLD)
+    (asserts! (< humidity-min humidity-max) ERR_INVALID_THRESHOLD)
+    (asserts! (< moisture-min moisture-max) ERR_INVALID_THRESHOLD)
+    (asserts! (< ph-min ph-max) ERR_INVALID_THRESHOLD)
+    
+    (map-set sensor-thresholds
+      { sensor-id: sensor-id }
+      {
+        temp-min: temp-min, temp-max: temp-max,
+        humidity-min: humidity-min, humidity-max: humidity-max,
+        moisture-min: moisture-min, moisture-max: moisture-max,
+        ph-min: ph-min, ph-max: ph-max,
+        active: true,
+        owner: tx-sender,
+        created-at: stacks-block-height
+      }
+    )
+    (ok true)
+  )
+)
+
+(define-private (check-and-create-alerts (sensor-id uint) (temperature int) (humidity uint) (soil-moisture uint) (ph-level uint))
+  (let
+    (
+      (thresholds (map-get? sensor-thresholds { sensor-id: sensor-id }))
+      (timestamp stacks-block-height)
+    )
+    (match thresholds
+      threshold-data
+      (begin
+        (if (get active threshold-data)
+          (begin
+            (if (< temperature (get temp-min threshold-data))
+              (create-alert sensor-id "temp-low" temperature (get temp-min threshold-data) timestamp)
+              true)
+            (if (> temperature (get temp-max threshold-data))
+              (create-alert sensor-id "temp-high" temperature (get temp-max threshold-data) timestamp)
+              true)
+            (if (< humidity (get humidity-min threshold-data))
+              (create-alert sensor-id "humidity-low" (to-int humidity) (to-int (get humidity-min threshold-data)) timestamp)
+              true)
+            (if (> humidity (get humidity-max threshold-data))
+              (create-alert sensor-id "humidity-high" (to-int humidity) (to-int (get humidity-max threshold-data)) timestamp)
+              true)
+          )
+          true
+        )
+        true
+      )
+      true
+    )
+  )
+)
+
+(define-private (create-alert (sensor-id uint) (alert-type (string-ascii 20)) (value int) (threshold int) (timestamp uint))
+  (let
+    (
+      (alert-id (var-get next-alert-id))
+      (diff (- value threshold))
+      (severity (if (> (if (< diff 0) (- 0 diff) diff) 10) u3 u2))
+    )
+    (map-set active-alerts
+      { alert-id: alert-id }
+      {
+        sensor-id: sensor-id,
+        alert-type: alert-type,
+        value: value,
+        threshold: threshold,
+        timestamp: timestamp,
+        resolved: false,
+        severity: severity
+      }
+    )
+    (var-set next-alert-id (+ alert-id u1))
+    true
+  )
+)
+
+(define-read-only (get-sensor-thresholds (sensor-id uint))
+  (map-get? sensor-thresholds { sensor-id: sensor-id })
+)
+
+(define-read-only (get-alert (alert-id uint))
+  (map-get? active-alerts { alert-id: alert-id })
 )
