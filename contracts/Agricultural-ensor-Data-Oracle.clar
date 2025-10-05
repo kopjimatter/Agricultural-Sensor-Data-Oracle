@@ -13,6 +13,14 @@
 (define-constant ERR_ALERT_NOT_FOUND (err u109))
 (define-constant ERR_INVALID_THRESHOLD (err u110))
 
+(define-data-var next-listing-id uint u1)
+(define-data-var next-pass-id uint u1)
+
+(define-constant ERR_LISTING_NOT_FOUND (err u111))
+(define-constant ERR_LISTING_INACTIVE (err u112))
+(define-constant ERR_INVALID_DURATION (err u113))
+(define-constant ERR_ACCESS_EXPIRED (err u114))
+
 (define-data-var oracle-fee uint u1000000)
 (define-data-var next-sensor-id uint u1)
 (define-data-var next-oracle-id uint u1)
@@ -578,4 +586,131 @@
 
 (define-read-only (get-alert (alert-id uint))
   (map-get? active-alerts { alert-id: alert-id })
+)
+
+
+(define-map marketplace-listings
+  { listing-id: uint }
+  {
+    sensor-id: uint,
+    seller: principal,
+    price-per-block: uint,
+    min-duration: uint,
+    max-duration: uint,
+    active: bool,
+    created-at: uint,
+    total-sales: uint
+  }
+)
+
+(define-map sensor-to-listing
+  { sensor-id: uint }
+  { listing-id: uint }
+)
+
+(define-map access-passes
+  { pass-id: uint }
+  {
+    listing-id: uint,
+    buyer: principal,
+    sensor-id: uint,
+    purchased-at: uint,
+    expires-at: uint,
+    amount-paid: uint
+  }
+)
+
+(define-map buyer-active-passes
+  { buyer: principal, sensor-id: uint }
+  { pass-id: uint, expires-at: uint }
+)
+
+(define-public (create-marketplace-listing 
+  (sensor-id uint)
+  (price-per-block uint)
+  (min-duration uint)
+  (max-duration uint)
+)
+  (let
+    (
+      (sensor (unwrap! (map-get? sensors { sensor-id: sensor-id }) ERR_SENSOR_NOT_FOUND))
+      (listing-id (var-get next-listing-id))
+    )
+    (asserts! (is-eq tx-sender (get owner sensor)) ERR_UNAUTHORIZED)
+    (asserts! (> price-per-block u0) ERR_INVALID_DATA)
+    (asserts! (and (> min-duration u0) (>= max-duration min-duration)) ERR_INVALID_DURATION)
+    
+    (map-set marketplace-listings
+      { listing-id: listing-id }
+      {
+        sensor-id: sensor-id,
+        seller: tx-sender,
+        price-per-block: price-per-block,
+        min-duration: min-duration,
+        max-duration: max-duration,
+        active: true,
+        created-at: stacks-block-height,
+        total-sales: u0
+      }
+    )
+    (map-set sensor-to-listing { sensor-id: sensor-id } { listing-id: listing-id })
+    (var-set next-listing-id (+ listing-id u1))
+    (ok listing-id)
+  )
+)
+
+(define-public (purchase-access-pass (listing-id uint) (duration uint))
+  (let
+    (
+      (listing (unwrap! (map-get? marketplace-listings { listing-id: listing-id }) ERR_LISTING_NOT_FOUND))
+      (total-cost (* (get price-per-block listing) duration))
+      (pass-id (var-get next-pass-id))
+      (expires-at (+ stacks-block-height duration))
+    )
+    (asserts! (get active listing) ERR_LISTING_INACTIVE)
+    (asserts! (and (>= duration (get min-duration listing)) (<= duration (get max-duration listing))) ERR_INVALID_DURATION)
+    
+    (try! (stx-transfer? total-cost tx-sender (get seller listing)))
+    
+    (map-set access-passes
+      { pass-id: pass-id }
+      {
+        listing-id: listing-id,
+        buyer: tx-sender,
+        sensor-id: (get sensor-id listing),
+        purchased-at: stacks-block-height,
+        expires-at: expires-at,
+        amount-paid: total-cost
+      }
+    )
+    (map-set buyer-active-passes
+      { buyer: tx-sender, sensor-id: (get sensor-id listing) }
+      { pass-id: pass-id, expires-at: expires-at }
+    )
+    (map-set marketplace-listings
+      { listing-id: listing-id }
+      (merge listing { total-sales: (+ (get total-sales listing) u1) })
+    )
+    (var-set next-pass-id (+ pass-id u1))
+    (ok pass-id)
+  )
+)
+
+(define-read-only (has-valid-access (buyer principal) (sensor-id uint))
+  (match (map-get? buyer-active-passes { buyer: buyer, sensor-id: sensor-id })
+    pass-data (< stacks-block-height (get expires-at pass-data))
+    false
+  )
+)
+
+(define-read-only (get-marketplace-listing (listing-id uint))
+  (map-get? marketplace-listings { listing-id: listing-id })
+)
+
+(define-read-only (get-access-pass (pass-id uint))
+  (map-get? access-passes { pass-id: pass-id })
+)
+
+(define-read-only (get-buyer-pass-info (buyer principal) (sensor-id uint))
+  (map-get? buyer-active-passes { buyer: buyer, sensor-id: sensor-id })
 )
