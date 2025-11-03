@@ -714,3 +714,111 @@
 (define-read-only (get-buyer-pass-info (buyer principal) (sensor-id uint))
   (map-get? buyer-active-passes { buyer: buyer, sensor-id: sensor-id })
 )
+
+
+(define-map batch-submissions
+  { batch-id: uint }
+  {
+    oracle-id: uint,
+    sensor-id: uint,
+    readings-count: uint,
+    submitted-at: uint,
+    submitted-by: principal
+  }
+)
+
+(define-data-var next-batch-id uint u1)
+
+(define-public (submit-sensor-data-batch
+  (oracle-id uint)
+  (sensor-id uint)
+  (readings (list 10 {
+    timestamp-offset: uint,
+    temperature: int,
+    humidity: uint,
+    soil-moisture: uint,
+    ph-level: uint,
+    light-intensity: uint,
+    rainfall: uint
+  }))
+)
+  (let
+    (
+      (oracle (unwrap! (map-get? oracles { oracle-id: oracle-id }) ERR_ORACLE_NOT_FOUND))
+      (sensor (unwrap! (map-get? sensors { sensor-id: sensor-id }) ERR_SENSOR_NOT_FOUND))
+      (permission (unwrap! (map-get? oracle-permissions { oracle-id: oracle-id, sensor-id: sensor-id }) ERR_UNAUTHORIZED))
+      (batch-id (var-get next-batch-id))
+      (base-timestamp stacks-block-height)
+    )
+    (asserts! (is-eq tx-sender (get address oracle)) ERR_UNAUTHORIZED)
+    (asserts! (get authorized permission) ERR_UNAUTHORIZED)
+    (asserts! (get active oracle) ERR_ORACLE_NOT_FOUND)
+    (asserts! (get active sensor) ERR_SENSOR_NOT_FOUND)
+    (asserts! (> (len readings) u0) ERR_INVALID_DATA)
+    
+    (try! (fold process-batch-reading readings (ok { sensor-id: sensor-id, count: u0 })))
+    
+    (map-set batch-submissions
+      { batch-id: batch-id }
+      {
+        oracle-id: oracle-id,
+        sensor-id: sensor-id,
+        readings-count: (len readings),
+        submitted-at: base-timestamp,
+        submitted-by: tx-sender
+      }
+    )
+    
+    (map-set sensors
+      { sensor-id: sensor-id }
+      (merge sensor { last-update: base-timestamp })
+    )
+    
+    (map-set oracles
+      { oracle-id: oracle-id }
+      (merge oracle { 
+        total-updates: (+ (get total-updates oracle) (len readings)),
+        reputation: (+ (get reputation oracle) (len readings))
+      })
+    )
+    
+    (var-set next-batch-id (+ batch-id u1))
+    (ok batch-id)
+  )
+)
+
+(define-private (process-batch-reading 
+  (reading { timestamp-offset: uint, temperature: int, humidity: uint, soil-moisture: uint, ph-level: uint, light-intensity: uint, rainfall: uint })
+  (state (response { sensor-id: uint, count: uint } uint))
+)
+  (match state
+    success-data
+    (let
+      (
+        (sensor-id (get sensor-id success-data))
+        (timestamp (- stacks-block-height (get timestamp-offset reading)))
+      )
+      (asserts! (and (>= (get humidity reading) u0) (<= (get humidity reading) u100)) ERR_INVALID_DATA)
+      (asserts! (and (>= (get soil-moisture reading) u0) (<= (get soil-moisture reading) u100)) ERR_INVALID_DATA)
+      (asserts! (and (>= (get ph-level reading) u0) (<= (get ph-level reading) u1400)) ERR_INVALID_DATA)
+      
+      (map-set sensor-data
+        { sensor-id: sensor-id, timestamp: timestamp }
+        {
+          temperature: (get temperature reading),
+          humidity: (get humidity reading),
+          soil-moisture: (get soil-moisture reading),
+          ph-level: (get ph-level reading),
+          light-intensity: (get light-intensity reading),
+          rainfall: (get rainfall reading)
+        }
+      )
+      (ok { sensor-id: sensor-id, count: (+ (get count success-data) u1) })
+    )
+    error-val (err error-val)
+  )
+)
+
+(define-read-only (get-batch-info (batch-id uint))
+  (map-get? batch-submissions { batch-id: batch-id })
+)
